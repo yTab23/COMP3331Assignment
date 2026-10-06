@@ -1,0 +1,56 @@
+[
+  {
+    "name": "get_reading",
+    "description": "Return the latest fictional reading.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "station_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "station_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_history",
+    "description": "Return the latest readings in chronological order.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "station_id": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      },
+      "required": [
+        "station_id",
+        "limit"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "analyse_readings",
+    "description": "Compute the mean of fictional station readings.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "station_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "station_id"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

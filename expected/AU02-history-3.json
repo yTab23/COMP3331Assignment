@@ -1,0 +1,17 @@
+{
+  "station_id": "AU02",
+  "readings": [
+    {
+      "sample": 6,
+      "temperature_c": 15
+    },
+    {
+      "sample": 7,
+      "temperature_c": 16
+    },
+    {
+      "sample": 8,
+      "temperature_c": 17
+    }
+  ]
+}

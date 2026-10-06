@@ -1,0 +1,7 @@
+{
+  "station_id": "AU01",
+  "reading": {
+    "sample": 8,
+    "temperature_c": 27
+  }
+}
