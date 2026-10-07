@@ -1,0 +1,70 @@
+{
+  "AU01": [
+    {
+      "sample": 1,
+      "temperature_c": 20
+    },
+    {
+      "sample": 2,
+      "temperature_c": 21
+    },
+    {
+      "sample": 3,
+      "temperature_c": 22
+    },
+    {
+      "sample": 4,
+      "temperature_c": 23
+    },
+    {
+      "sample": 5,
+      "temperature_c": 24
+    },
+    {
+      "sample": 6,
+      "temperature_c": 25
+    },
+    {
+      "sample": 7,
+      "temperature_c": 26
+    },
+    {
+      "sample": 8,
+      "temperature_c": 27
+    }
+  ],
+  "AU02": [
+    {
+      "sample": 1,
+      "temperature_c": 10
+    },
+    {
+      "sample": 2,
+      "temperature_c": 11
+    },
+    {
+      "sample": 3,
+      "temperature_c": 12
+    },
+    {
+      "sample": 4,
+      "temperature_c": 13
+    },
+    {
+      "sample": 5,
+      "temperature_c": 14
+    },
+    {
+      "sample": 6,
+      "temperature_c": 15
+    },
+    {
+      "sample": 7,
+      "temperature_c": 16
+    },
+    {
+      "sample": 8,
+      "temperature_c": 17
+    }
+  ]
+}

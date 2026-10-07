@@ -3,7 +3,7 @@
 import sys
 
 from app_support import client_options
-from support.python.student_tools import parse_json
+from python.student_tools import parse_json
 
 
 def main():
