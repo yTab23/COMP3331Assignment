@@ -1,71 +1,52 @@
 
-import sys
-import socket
 import json
-import threading
+
+HEADER_END = b"\r\n\r\n"
 
 
-def handle(conn):
-    header, body = processRequest(conn)
-    print("HEADERS:", header)
-    print("BODY:", body)
+class Connection:
+    def __init__(self, sock):
+        self.sock = sock
+        self.buffer = bytearray()
 
 
-def processRequest(serverSocket):
-    ## keep a bytearray buffer
-    buffer = bytearray()
-    # get all data chunks
+    def read_message(self):
+        while HEADER_END not in self.buffer:
+            data = self.sock.recv(1024)
+            if data == b"":
+                if len(self.buffer) == 0:
+                    return None
+                raise ConnectionError("closed mid-headers")
+            self.buffer.extend(data)
 
-    #Phase A
-    while True:
-        data = serverSocket.recv(1024)
-        if data == b'':
-            break
+    # Phase B: Parse and decode only the header bytes
+        header_end = self.buffer.index(HEADER_END) + 4
+        header_text = self.buffer[:header_end].decode("utf-8")
 
-        buffer.extend(data)
-        if b"\r\n\r\n" in buffer:
-            break
+        headers = {}
+        for line in header_text.split("\r\n")[1:]:     # [0] is the request/status line
+            if ":" in line:
+                name, value = line.split(":", 1)
+                headers[name.strip().lower()] = value.strip()
 
-    #Phase B
-    #Add all chunks into one big batch then decode:
-    request = buffer.decode('utf-8')
-    header = {}
+        content_length = int(headers["content-length"])
+        total = header_end + content_length
 
-    parts = request.split('\r\n')
-    for line in parts:
-        if ": " in line:
-            name, value = line.split(": ")
-            header[name] = value
+        # Phase C: wait until the whole message is in the buffer
+        while len(self.buffer) < total:
+            data = self.sock.recv(1024)
+            if data == b"":
+                raise ConnectionError("closed mid-body")
+            self.buffer.extend(data)
 
-    ContentLength = int(header["Content-Length"])
-    # Phase 3
-    # With the bytes for the header collected, it is now time to
-    # receive bytes again and collect the body.
+        body = json.loads(self.buffer[header_end:total].decode("utf-8"))
 
-    header_end = buffer.index(b"\r\n\r\n") + 4
-    body_so_far = buffer[header_end:]
+        del self.buffer[:total]            # consume exactly one message, keep the rest
+        return headers, body
 
-    while len(body_so_far) < ContentLength:
-        data = serverSocket.recv(1024)
-        if data == b'':
-            break
-        body_so_far += data
 
-    body = json.loads(body_so_far.decode('utf-8'))
 
-    return (header , body)
 
-def main():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("127.0.0.1", 51000))
-    server.listen(1)
-    print("Listening on 127.0.0.1:51000...")
-    conn, addr = server.accept()
-    handle(conn)
-
-if __name__ == "__main__":
-    main()
 
 
 
