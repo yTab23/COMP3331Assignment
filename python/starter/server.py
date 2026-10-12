@@ -1,38 +1,110 @@
-"""Server entry point. Implement accepting and serving TCP connections here."""
-
+import os
 import sys
+import threading
+import json
+import socket
+import app_support
+from mcp_io import Connection, build_response
 
-from app_support import server_options
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "support", "python"))
+DATASET_PATH = os.path.join(HERE, "support", "data", "readings.json")
+
+import app_support
+from student_tools import (TOOLS, load_dataset, get_reading, get_history,
+                           analyse_readings)
+
+QUICK_TOOLS = {"get_reading": get_reading, "get_history": get_history}
+ALL_TOOL_NAMES = set(QUICK_TOOLS) | {"analyse_readings"}
 
 
-"""
-handle_request(headers, body) in server.py. It returns (status, payload_dict) and never touches a socket, so you can test it by calling it directly. It dispatches on body["method"]:
+# --- The three response shapes I could not verify. Fix them here only. ---
 
-server/discover returns app_support.result(id, {"supportedVersions": [...], "capabilities": {...}}).
+def discover_result():
+    # GUESS: check against the reference server's real output
+    return {"supportedVersions": [app_support.VERSION],
+            "capabilities": {"tools": {}}}
 
-tools/list returns result(id, {"tools": TOOLS}).
 
-tools/call looks up params["name"] in a dict of get_reading/get_history/analyse_readings. For now, treat analyse_readings as a plain call that returns JSON. Streaming is Phase 2.
+def tool_success(data):
+    return {
+        "content": [{"type": "text",
+                     "text": json.dumps(data, separators=(",", ":"), allow_nan=False)}],
+        "isError": False,
+    }
 
-An unknown method returns (404, error(id, -32601, ...)).
 
-An unknown tool returns (400, error(id, -32602, ...)), without running anything.
+def tool_failure(message):
+    # Inferred: same content shape with isError true. The worked examples
+    # show a success only, so confirm against the reference client.
+    return {
+        "content": [{"type": "text", "text": message}],
+        "isError": True,
+    }
 
-If the tool raises ValueError, return HTTP 200 with a completed result carrying isError: true. That’s a tool failure, not a JSON-RPC error.
+def handle_request(headers, body, dataset, analysis_delay):
+    """Return (http_status, json_payload_dict). Never touches a socket."""
+    request_id = body["id"]              # copied through untouched, whatever its type
+    method = body["method"]
 
-Reuse the request id exactly as received, whatever its type.
+    if method == "server/discover":
+        return 200, app_support.result(request_id, discover_result())
 
-"""
-def handle_request(headers, body):
-    print()
+    if method == "tools/list":
+        return 200, app_support.result(request_id, {"tools": TOOLS})
+
+    if method == "tools/call":
+        name = body["params"]["name"]
+        arguments = body["params"]["arguments"]
+
+        if name not in ALL_TOOL_NAMES:   # reject before running anything
+            return 400, app_support.error(request_id, -32602, "Unknown tool: " + name)
+
+        try:
+            if name == "analyse_readings":
+                # Phase 1 only: no streaming, so progress is a no-op, stop never fires.
+                data = analyse_readings(dataset, arguments, analysis_delay,
+                                        lambda done, total: None, threading.Event())
+            else:
+                data = QUICK_TOOLS[name](dataset, arguments)
+        except (ValueError, ArithmeticError) as exc:
+            # Tool failure: HTTP 200 with a completed result, not a JSON-RPC error
+            return 200, app_support.result(request_id, tool_failure(str(exc)))
+
+        return 200, app_support.result(request_id, tool_success(data))
+
+    return 404, app_support.error(request_id, -32601, "Method not found: " + method)
+
+def serve_connection(sock, dataset, analysis_delay):
+    conn = Connection(sock)
+    try:
+        while True:
+            message = conn.read_message()
+            if message is None:                    # client closed cleanly
+                break
+            headers, body = message
+            status, payload = handle_request(headers, body, dataset, analysis_delay)
+            sock.sendall(build_response(status, payload))
+    except (ConnectionError, OSError, ValueError, KeyError) as exc:
+        print("connection dropped: %s: %s" % (type(exc).__name__, exc), file=sys.stderr)   # never reuse a failed connection
+    finally:
+        sock.close()
 
 
 def main():
-    options = server_options()
-    print(f"Starter only: server on port {options.port} is not implemented",
-          file=sys.stderr)
-    return 2
+    options = app_support.server_options()
+    dataset = load_dataset(DATASET_PATH)           # once, at startup
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", options.port))
+    server.listen()
+    print("Listening on 127.0.0.1:%d" % options.port, file=sys.stderr)
+
+    while True:
+        sock, _addr = server.accept()
+        serve_connection(sock, dataset, options.analysis_delay)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
