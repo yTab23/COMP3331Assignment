@@ -2,7 +2,18 @@
 import json
 
 HEADER_END = b"\r\n\r\n"
+REASONS = {200: "OK", 400: "Bad Request", 404: "Not Found" }
 
+
+def build_response(status, payload):
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")   # serialize first
+    head = (
+            f"HTTP/1.1 {status} {REASONS[status]}\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "\r\n"
+    )
+    return head.encode("ascii") + body
 
 class Connection:
     def __init__(self, sock):
@@ -43,6 +54,9 @@ class Connection:
 
         del self.buffer[:total]            # consume exactly one message, keep the rest
         return headers, body
+
+
+
 
 
 
