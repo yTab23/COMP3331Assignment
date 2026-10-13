@@ -15,6 +15,22 @@ def build_response(status, payload):
     )
     return head.encode("ascii") + body
 
+def build_request(payload, host, port):
+    body = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    meta = payload["params"]["_meta"]
+    lines = [
+        "POST /mcp HTTP/1.1",
+        f"Host: {host}:{port}",
+        "Content-Type: application/json",
+        "Accept: application/json, text/event-stream",
+        "MCP-Protocol-Version: " + meta["io.modelcontextprotocol/protocolVersion"],
+        "Mcp-Method: " + payload["method"],
+    ]
+    if payload["method"] == "tools/call":
+        lines.append("Mcp-Name: " + payload["params"]["name"])
+    lines.append(f"Content-Length: {len(body)}")
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii") + body
+
 class Connection:
     def __init__(self, sock):
         self.sock = sock
@@ -35,6 +51,10 @@ class Connection:
         header_text = self.buffer[:header_end].decode("utf-8")
 
         headers = {}
+
+        lines = header_text.split("\r\n")
+        self.start_line = lines[0]              # e.g. "HTTP/1.1 200 OK"
+
         for line in header_text.split("\r\n")[1:]:     # [0] is the request/status line
             if ":" in line:
                 name, value = line.split(":", 1)

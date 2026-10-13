@@ -1,0 +1,12 @@
+{"op":"discover"}
+{"op":"wait"}
+{"op":"list"}
+{"op":"wait"}
+{"op":"call","name":"get_reading","arguments":{"station_id":"AU01"}}
+{"op":"wait"}
+{"op":"call","name":"get_history","arguments":{"station_id":"AU01","limit":0}}
+{"op":"wait"}
+{"op":"call","name":"absent_tool","arguments":{}}
+{"op":"wait"}
+not json
+{"op":"nonsense"}
