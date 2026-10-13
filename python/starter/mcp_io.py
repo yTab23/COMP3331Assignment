@@ -48,6 +48,7 @@ class Connection:
 
 
     def read_message(self):
+    #Phase A: Retrieve header chunk by chunk
         while HEADER_END not in self.buffer:
             data = self.sock.recv(1024)
             if data == b"":
@@ -84,6 +85,71 @@ class Connection:
 
         del self.buffer[:total]            # consume exactly one message, keep the rest
         return headers, body
+
+
+
+    def read_head(self):
+
+        # waits for the header block,
+        while HEADER_END not in self.buffer:
+            data = self.sock.recv(1024)
+            if data == b"":
+                if len(self.buffer) == 0:
+                    return None
+                raise ConnectionError("closed mid-headers")
+            self.buffer.extend(data)
+        # parses it into self.start_line and the headers dict,
+        header_end = self.buffer.index(HEADER_END) + 4
+        header_text = self.buffer[:header_end].decode("utf-8")
+
+        headers = {}
+
+        lines = header_text.split("\r\n")
+        self.start_line = lines[0]
+
+        for line in header_text.split("\r\n")[1:]:     # [0] is the request/status line
+            if ":" in line:
+                name, value = line.split(":", 1)
+                headers[name.strip().lower()] = value.strip()
+
+        # and deletes the header bytes from the buffer.
+
+        del self.buffer[:header_end]
+        # It returns the headers and stops there.
+        return headers
+
+    def _more(self):
+        #Receive more bytes into the buffer.
+        #EOF here is always an error
+        data = self.sock.recv(1024)
+        if data == b"":
+            raise ConnectionError("closed mid-body")
+        self.buffer.extend(data)
+
+    def read_chunk(self):
+        # Return one chunk's data as bytes, or None for the zero chunk (body finished).
+
+        while b"\r\n" not in self.buffer:
+            self._more()
+        line_end = self.buffer.index(b"\r\n")
+        size = int(self.buffer[:line_end].strip(), 16)
+
+        data_start = line_end + 2
+        chunk_end = data_start + size + 2
+        while len(self.buffer) < chunk_end:
+            self._more()
+
+        if self.buffer[chunk_end - 2:chunk_end] != b"\r\n":
+            raise ValueError("chunk is not terminated by CRLF")
+
+        data = bytes(self.buffer[data_start:data_start + size])
+        del self.buffer[:chunk_end]
+        return None if size == 0 else data
+
+
+
+
+
 
 
 
