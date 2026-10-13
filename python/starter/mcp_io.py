@@ -147,8 +147,36 @@ class Connection:
         return None if size == 0 else data
 
 
+"""
+Work in bytes until the last moment. The buffer is a bytearray, b"\n\n" is the boundary you search for, and you only decode after you hold one complete event. Decoding each chunk separately can split a multi-byte UTF-8 character down the middle.
+
+Use the same slicing pattern as the other buffers. Find the boundary with index, take everything before it as one event, and del that event and its two LF bytes from the front. Then loop, because one feed() call can contain several events. A single if would only catch the first.
+
+Strip the prefix exactly. An event should start with data: , six bytes with the space. If it doesn’t, decide what to do (raise ValueError is the simplest) instead of passing it on.
+Parse with parse_json, which you already import from student_tools. It decodes text, so give it event_bytes.decode("utf-8").
+
+The leftover is state. Whatever follows the last \n\n stays in self.buffer. That’s where a half-received event waits for the next chunk.
+Return a list, even when it’s empty or has one item. The caller loops over it.
+
+"""
 
 
+class SSEBuffer:
+    def __init__(self):
+        self.buffer = bytearray()
+
+
+    def feed(self, data):
+        self.buffer.extend(data)
+        events = []
+        while b"\n\n" in self.buffer:
+            boundary = self.buffer.index(b"\n\n")
+            raw = bytes(self.buffer[:boundary])
+            del self.buffer[:boundary + 2]
+            if not raw.startswith(b"data: "):
+                raise ValueError("SSE event does not start with 'data: '")
+            events.append(json.loads(raw[6:].decode("utf-8")))
+        return events
 
 
 
