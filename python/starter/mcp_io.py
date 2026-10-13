@@ -3,6 +3,16 @@ import json
 
 HEADER_END = b"\r\n\r\n"
 REASONS = {200: "OK", 400: "Bad Request", 404: "Not Found" }
+LAST_CHUNK = b"0\r\n\r\n"
+
+def sse_event(payload):
+    text = json.dumps(payload, separators=(",", ":"), allow_nan=False)
+    return b"data: " + text.encode("utf-8") + b"\n\n"
+
+
+
+def encode_chunk(data):
+    return ("%x" % len(data)).encode("ascii") + b"\r\n" + data + b"\r\n"
 
 
 def build_response(status, payload):

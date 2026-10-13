@@ -4,7 +4,7 @@ import threading
 import json
 import socket
 import app_support
-from mcp_io import Connection, build_response
+from mcp_io import Connection, build_response, sse_event, build_request, encode_chunk, LAST_CHUNK
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "support", "python"))
@@ -19,6 +19,45 @@ ALL_TOOL_NAMES = set(QUICK_TOOLS) | {"analyse_readings"}
 
 
 # --- The three response shapes I could not verify. Fix them here only. ---
+
+
+def stream_analysis(sock, body, dataset, analysis_delay):
+    request_id = body.get("id")
+    token = body.get("params").get("_meta").get("progressToken")
+    arguments = body.get("params").get("arguments")
+
+    sock.sendall(
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: text/event-stream\r\n"
+        b"Transfer-Encoding: chunked\r\n"
+        b"\r\n"
+    )
+
+    stop = threading.Event()
+
+    def progress(done, total):
+        event = sse_event(app_support.progress(token, done, total))
+        sock.sendall(encode_chunk(event))
+
+    try:
+        data = analyse_readings(dataset, arguments, analysis_delay, progress, stop)
+        final = app_support.result(request_id, tool_success(data))
+    except (ValueError, ArithmeticError) as exc:
+
+        final = app_support.result(request_id, tool_failure(str(exc)))
+    sock.sendall(encode_chunk(sse_event(final)))
+    sock.sendall(LAST_CHUNK)
+
+
+
+def wants_stream(body):
+    if body.get("method") != "tools/call":
+        return False
+    params = body.get("params")
+    if not isinstance(params, dict) or params.get("name") != "analyse_readings":
+        return False
+    meta = params.get("_meta")
+    return isinstance(meta, dict) and "progressToken" in meta
 
 def discover_result():
     # GUESS: check against the reference server's real output
@@ -83,6 +122,9 @@ def serve_connection(sock, dataset, analysis_delay):
             if message is None:                    # client closed cleanly
                 break
             headers, body = message
+            if wants_stream(body):
+                stream_analysis(sock, body, dataset, analysis_delay)
+                continue                       # back to read_message(): the connection stays reusable
             status, payload = handle_request(headers, body, dataset, analysis_delay)
             sock.sendall(build_response(status, payload))
     except (ConnectionError, OSError, ValueError, KeyError) as exc:
@@ -103,6 +145,7 @@ def main():
 
     while True:
         sock, _addr = server.accept()
+        print("accepted", _addr, file=sys.stderr)
         serve_connection(sock, dataset, options.analysis_delay)
 
 
