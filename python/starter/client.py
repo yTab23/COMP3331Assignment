@@ -34,53 +34,62 @@ def run_call(host, port, request_id, method, parameters, token=None, on_progress
         return "invalid_response", None, None     # includes an id mismatch or bad JSON
     return classify(status, response), status, response
 
+
+def read_response(conn, request_id, token, on_progress=None):
+    headers = conn.read_head()
+    if headers is None:
+        raise ConnectionError("server closed the connection without a response")
+    status = int(conn.start_line.split(" ", 2)[1])
+
+    if "text/event-stream" in headers.get("content-type", ""):
+        sse = SSEBuffer()
+        final = None
+        while True:
+            data = conn.read_chunk()
+            if data is None:
+                break
+            for message in sse.feed(data):
+                if final is not None:
+                    raise ValueError("data after the final response")
+                if "id" in message:                       # the final response
+                    if not same_value(message["id"], request_id):
+                        raise ValueError("response id does not match request id")
+                    final = message
+                elif message.get("method") == "notifications/progress":
+                    params = message["params"]
+                    if not same_value(params.get("progressToken"), token):
+                        raise ValueError("progress token does not match")
+                    if on_progress:
+                        on_progress(params)
+                else:
+                    raise ValueError("unexpected message in stream")                               # your sorting code, unchanged
+        if final is None or sse.buffer:
+            raise ConnectionError("stream ended without a complete final response")
+    else:                                             # lines up with the outer if
+        final = json.loads(conn.read_body(headers).decode("utf-8"))
+        if not same_value(final.get("id"), request_id):
+            raise ValueError("response id does not match request id")
+
+    return status, final, headers
+
+
 def exchange(host, port, request_id, method, parameters, token=None, on_progress=None):
-    """One request, one response, on a fresh connection. Returns (http_status, response)."""
     request = app_support.request(request_id, method, parameters, token)
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.connect((host, port))
         sock.sendall(build_request(request, host, port))
         conn = Connection(sock)
-        headers = conn.read_head()
-        if headers is None:
-            raise ConnectionError("server closed the connection without a response")
-        status = int(conn.start_line.split(" ", 2)[1])
-
-        if "text/event-stream" in headers.get("content-type", ""):
-            sse = SSEBuffer()
-            final = None
-            while True:
-                data = conn.read_chunk()
-                if data is None:                          # zero chunk: body finished
-                    break
-                for message in sse.feed(data):
-                    if final is not None:
-                        raise ValueError("data after the final response")
-                    if "id" in message:                   # the final response
-                        if not same_value(message["id"], request_id):
-                            raise ValueError("response id does not match request id")
-                        final = message
-                    elif message.get("method") == "notifications/progress":
-                        params = message["params"]
-                        if not same_value(params.get("progressToken"), token):
-                            raise ValueError("progress token does not match")
-                        if on_progress:
-                            on_progress(params)
-                    else:
-                        raise ValueError("unexpected message in stream")
-            if final is None or sse.buffer:               # no result, or a half-received event
-                raise ConnectionError("stream ended without a complete final response")
-        else:
-            final = json.loads(conn.read_body(headers).decode("utf-8"))
-            if not same_value(final.get("id"), request_id):
-                raise ValueError("response id does not match request id")
+        status, final, _ = read_response(conn, request_id, token, on_progress)
 
     return status, final
 
 def same_value(a, b):
     """Equal in value and JSON type: 17 is not "17", and 1 is not True."""
     return type(a) is type(b) and a == b
+
+
+
 
 def main():
     options = client_options()
