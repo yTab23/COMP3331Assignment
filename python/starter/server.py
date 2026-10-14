@@ -144,8 +144,8 @@ def main():
     print("Listening on 127.0.0.1:%d" % options.port, file=sys.stderr)
 
     while True:
-        sock, _addr = server.accept()
-        print("accepted", _addr, file=sys.stderr)
+        sock, addr = server.accept()
+        print("accepted", addr, file=sys.stderr)
         serve_connection(sock, dataset, options.analysis_delay)
 
 

@@ -11,6 +11,7 @@ from app_support import client_options
 from mcp_io import Connection, build_request, SSEBuffer
 from student_tools import parse_json
 
+idle = []
 
 def classify(status, response):
     """Turn one received response into the reference client's outcome name."""
@@ -73,15 +74,33 @@ def read_response(conn, request_id, token, on_progress=None):
     return status, final, headers
 
 
+def take_connection(host, port):
+    if idle:
+        return idle.pop()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.connect((host, port))
+    except BaseException:
+        sock.close()
+        raise
+    return Connection(sock)
+
+def give_back(conn, headers):
+    if headers.get("connection","").lower() == "close" or conn.buffer:
+        conn.sock.close()
+    else:
+        idle.append(conn)
+
 def exchange(host, port, request_id, method, parameters, token=None, on_progress=None):
     request = app_support.request(request_id, method, parameters, token)
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.connect((host, port))
-        sock.sendall(build_request(request, host, port))
-        conn = Connection(sock)
-        status, final, _ = read_response(conn, request_id, token, on_progress)
-
+    conn = take_connection(host, port)
+    try:
+        conn.sock.sendall(build_request(request, host, port))
+        status, final, headers = read_response(conn, request_id, token, on_progress)
+    except BaseException:
+        conn.sock.close()
+        raise
+    give_back(conn, headers)                 # after a clean, fully read response only
     return status, final
 
 def same_value(a, b):
@@ -141,7 +160,11 @@ def main():
             fields["response"] = response            # only when one was received
         app_support.emit("finished", **fields)
 
-    app_support.emit("idle")                         # EOF
+    app_support.emit("idle")
+
+    for conn in idle:
+        conn.sock.close()
+    idle.clear()                        # EOF
     return 0
 
 if __name__ == "__main__":
