@@ -48,42 +48,11 @@ class Connection:
 
 
     def read_message(self):
-    #Phase A: Retrieve header chunk by chunk
-        while HEADER_END not in self.buffer:
-            data = self.sock.recv(1024)
-            if data == b"":
-                if len(self.buffer) == 0:
-                    return None
-                raise ConnectionError("closed mid-headers")
-            self.buffer.extend(data)
-
-    # Phase B: Parse and decode only the header bytes
-        header_end = self.buffer.index(HEADER_END) + 4
-        header_text = self.buffer[:header_end].decode("utf-8")
-
-        headers = {}
-
-        lines = header_text.split("\r\n")
-        self.start_line = lines[0]              # e.g. "HTTP/1.1 200 OK"
-
-        for line in header_text.split("\r\n")[1:]:     # [0] is the request/status line
-            if ":" in line:
-                name, value = line.split(":", 1)
-                headers[name.strip().lower()] = value.strip()
-
-        content_length = int(headers["content-length"])
-        total = header_end + content_length
-
-        # Phase C: wait until the whole message is in the buffer
-        while len(self.buffer) < total:
-            data = self.sock.recv(1024)
-            if data == b"":
-                raise ConnectionError("closed mid-body")
-            self.buffer.extend(data)
-
-        body = json.loads(self.buffer[header_end:total].decode("utf-8"))
-
-        del self.buffer[:total]            # consume exactly one message, keep the rest
+        headers = self.read_head()
+        if headers is None:
+            return None
+        raw = self.read_body(headers)
+        body = json.loads(raw.decode("utf-8"))
         return headers, body
 
 
@@ -146,19 +115,16 @@ class Connection:
         del self.buffer[:chunk_end]
         return None if size == 0 else data
 
+    def read_body(self, headers):
+        content_length = int(headers["content-length"])
+        while len(self.buffer) < content_length:
+            self._more()
+        body = bytes(self.buffer[:content_length])
+        del self.buffer[:content_length]
+        return body
 
-"""
-Work in bytes until the last moment. The buffer is a bytearray, b"\n\n" is the boundary you search for, and you only decode after you hold one complete event. Decoding each chunk separately can split a multi-byte UTF-8 character down the middle.
 
-Use the same slicing pattern as the other buffers. Find the boundary with index, take everything before it as one event, and del that event and its two LF bytes from the front. Then loop, because one feed() call can contain several events. A single if would only catch the first.
 
-Strip the prefix exactly. An event should start with data: , six bytes with the space. If it doesn’t, decide what to do (raise ValueError is the simplest) instead of passing it on.
-Parse with parse_json, which you already import from student_tools. It decodes text, so give it event_bytes.decode("utf-8").
-
-The leftover is state. Whatever follows the last \n\n stays in self.buffer. That’s where a half-received event waits for the next chunk.
-Return a list, even when it’s empty or has one item. The caller loops over it.
-
-"""
 
 
 class SSEBuffer:
