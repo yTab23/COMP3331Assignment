@@ -10,3 +10,7 @@
 {"op":"wait"}
 not json
 {"op":"nonsense"}
+{"op":"call","name":"analyse_readings","arguments":{"station_id":"AU01"}}
+{"op":"wait"}
+{"op":"call","name":"analyse_readings","arguments":{"station_id":"ZZ99"}}
+{"op":"wait"}
