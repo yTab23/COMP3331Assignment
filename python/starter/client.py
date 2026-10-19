@@ -11,6 +11,23 @@ from app_support import client_options
 from mcp_io import Connection, build_request, SSEBuffer
 from student_tools import parse_json
 
+
+import threading
+import traceback
+
+lock = threading.Lock()          # protects idle and active
+active = {}                      # request_id -> Call
+
+
+class Call:
+    def __init__(self, call_id, method, token):
+        self.id = call_id
+        self.method = method
+        self.token = token
+        self.thread = None
+        self.conn = None          # the connection this call is using right now
+        self.cancelled = False
+
 idle = []
 
 def classify(status, response):
@@ -26,9 +43,10 @@ def classify(status, response):
         return "tool_error"
     return "success"
 
-def run_call(host, port, request_id, method, parameters, token=None, on_progress=None):
+def run_call(host, port, request_id, method, parameters, token=None, on_progress=None, on_connect=None):
     try:
-        status, response = exchange(host, port, request_id, method, parameters, token, on_progress)
+        status, response = exchange(host, port, request_id, method, parameters,
+                                    token, on_progress, on_connect)
     except (ConnectionError, OSError):
         return "network_error", None, None        # no retry: the outcome is uncertain
     except (ValueError, KeyError):
@@ -75,8 +93,9 @@ def read_response(conn, request_id, token, on_progress=None):
 
 
 def take_connection(host, port):
-    if idle:
-        return idle.pop()
+    with lock:
+        if idle:
+            return idle.pop()
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         sock.connect((host, port))
@@ -85,31 +104,78 @@ def take_connection(host, port):
         raise
     return Connection(sock)
 
+
 def give_back(conn, headers):
-    if headers.get("connection","").lower() == "close" or conn.buffer:
+    if headers.get("connection", "").lower() == "close" or conn.buffer:
         conn.sock.close()
     else:
-        idle.append(conn)
+        with lock:
+            idle.append(conn)
 
-def exchange(host, port, request_id, method, parameters, token=None, on_progress=None):
+def exchange(host, port, request_id, method, parameters, token=None, on_progress=None,on_connect=None):
     request = app_support.request(request_id, method, parameters, token)
     conn = take_connection(host, port)
     try:
+        if on_connect:
+            on_connect(conn)                  # register the connection (raises if already cancelled)
         conn.sock.sendall(build_request(request, host, port))
         status, final, headers = read_response(conn, request_id, token, on_progress)
+        if on_connect:
+            on_connect(None)                  # detach before the pool can see it
     except BaseException:
         conn.sock.close()
         raise
-    give_back(conn, headers)                 # after a clean, fully read response only
+    give_back(conn, headers)
     return status, final
 
 def same_value(a, b):
     """Equal in value and JSON type: 17 is not "17", and 1 is not True."""
     return type(a) is type(b) and a == b
 
+def run_worker(call, host, port, params):
+    def on_progress(p):                         # closes over this call, so no late-binding bug
+        app_support.emit("progress", id=call.id, token=call.token, params=p)
+    def attach(conn):
+        print("DEBUG attach:", conn, file=sys.stderr)    # temporary
+        with lock:
+            call.conn = conn
+    try:
+        outcome, status, response = run_call(host, port, call.id, call.method,
+                                             params, call.token, on_progress, attach)
+        if call.cancelled and outcome in ("network_error", "invalid_response"):
+            outcome, status, response = "cancelled", None, None
+    except Exception:
+        traceback.print_exc()                   # a bug in the client, but still report the call
+        outcome, status, response = "client_bug", None, None
+
+    fields = {"id": call.id, "outcome": outcome}
+    if status is not None:
+        fields["http_status"] = status
+    if response is not None:
+        fields["response"] = response
+    app_support.emit("finished", **fields)
+    with lock:
+        del active[call.id]
 
 
+def wait_for_calls():
+    with lock:
+        threads = [c.thread for c in active.values()]
+    for t in threads:
+        t.join()
 
+
+def cancel_call(call):
+    with lock:
+        call.cancelled = True
+        conn = call.conn
+    print("DEBUG cancel: conn is", conn, file=sys.stderr)   # temporary
+    if conn is not None:
+        try:
+            conn.sock.shutdown(socket.SHUT_RDWR)   # wakes a thread blocked in recv()
+        except OSError:
+            pass
+        conn.sock.close()
 def main():
     options = client_options()
     next_id = 1
@@ -125,10 +191,20 @@ def main():
             app_support.emit("input_error", message="line must be a JSON object with an op")
             continue
 
-        if op == "wait":
-            app_support.emit("idle")                 # each call already finished; real waiting is Phase 3
+        if op == "wait":                              # <-- snippet 1 replaces this branch
+            wait_for_calls()
+            app_support.emit("idle")
             continue
-
+        if op == "cancel":
+            cid = command.get("id")
+            with lock:
+                call = active.get(cid) if type(cid) is int else None
+            if call is None:
+                app_support.emit("input_error", message="no active call with that id")
+                continue
+            app_support.emit("cancel_requested", id=cid)
+            cancel_call(call)
+            continue
         if op == "discover":
             method, params, token = "server/discover", {}, None
         elif op == "list":
@@ -145,26 +221,23 @@ def main():
             app_support.emit("input_error", message="unsupported op: %s" % op)   # includes cancel, for now
             continue
 
-        request_id = next_id                         # ids are only used up by accepted requests
+        request_id = next_id
         next_id += 1
-        on_progress = lambda p: app_support.emit("progress", id=request_id, token=token, params=p)
-
+        call = Call(request_id, method, token)
+        call.thread = threading.Thread(target=run_worker,
+                                       args=(call, options.host, options.port, params),
+                                       daemon=True)
+        with lock:
+            active[request_id] = call
         app_support.emit("started", id=request_id, method=method, token=token)
-        outcome, status, response = run_call(options.host, options.port,
-                                     request_id, method, params, token, on_progress)
+        call.thread.start()                     # main goes straight back to reading stdin
 
-        fields = {"id": request_id, "outcome": outcome}
-        if status is not None:
-            fields["http_status"] = status           # only when known
-        if response is not None:
-            fields["response"] = response            # only when one was received
-        app_support.emit("finished", **fields)
-
+    wait_for_calls()
+    with lock:
+        for conn in idle:
+            conn.sock.close()
+        idle.clear()
     app_support.emit("idle")
-
-    for conn in idle:
-        conn.sock.close()
-    idle.clear()                        # EOF
     return 0
 
 if __name__ == "__main__":
