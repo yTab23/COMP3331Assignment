@@ -27,6 +27,8 @@ class Call:
         self.thread = None
         self.conn = None          # the connection this call is using right now
         self.cancelled = False
+        self.timed_out = False
+        self.timer = None
 
 idle = []
 
@@ -91,12 +93,14 @@ def read_response(conn, request_id, token, on_progress=None):
 
     return status, final, headers
 
-
+connect_timeout = 30.0
 def take_connection(host, port):
     with lock:
         if idle:
             return idle.pop()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock = socket.create_connection((host, port), timeout=connect_timeout)
+    sock.settimeout(None)                    # back to blocking: the timer enforces the total
+    return Connection(sock)
     try:
         sock.connect((host, port))
     except BaseException:
@@ -136,14 +140,22 @@ def run_worker(call, host, port, params):
     def on_progress(p):                         # closes over this call, so no late-binding bug
         app_support.emit("progress", id=call.id, token=call.token, params=p)
     def attach(conn):
-        print("DEBUG attach:", conn, file=sys.stderr)    # temporary
+        if call.cancelled or call.timed_out:
+                        raise ConnectionError("cancelled or timed out")
         with lock:
             call.conn = conn
     try:
         outcome, status, response = run_call(host, port, call.id, call.method,
                                              params, call.token, on_progress, attach)
+        if call.timer:
+            call.timer.cancel()                  # finished in time: the timer is no longer needed
+
         if call.cancelled and outcome in ("network_error", "invalid_response"):
             outcome, status, response = "cancelled", None, None
+
+        elif call.timed_out and outcome in ("network_error", "invalid_response"):
+            outcome, status, response = "timeout", None, None
+
     except Exception:
         traceback.print_exc()                   # a bug in the client, but still report the call
         outcome, status, response = "client_bug", None, None
@@ -165,19 +177,34 @@ def wait_for_calls():
         t.join()
 
 
-def cancel_call(call):
+def close_call_connection(call):
     with lock:
-        call.cancelled = True
         conn = call.conn
-    print("DEBUG cancel: conn is", conn, file=sys.stderr)   # temporary
     if conn is not None:
         try:
-            conn.sock.shutdown(socket.SHUT_RDWR)   # wakes a thread blocked in recv()
+            conn.sock.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
         conn.sock.close()
+
+
+def cancel_call(call):
+    with lock:
+        call.cancelled = True
+    close_call_connection(call)
+
+
+def expire_call(call):                       # runs on the timer thread
+    with lock:
+        call.timed_out = True
+    close_call_connection(call)
+
+
+
 def main():
+    global connect_timeout
     options = client_options()
+    connect_timeout = options.timeout
     next_id = 1
 
     for line in sys.stdin:
@@ -224,6 +251,9 @@ def main():
         request_id = next_id
         next_id += 1
         call = Call(request_id, method, token)
+        call.timer = threading.Timer(options.timeout, expire_call, args=(call,))
+        call.timer.daemon = True
+        call.timer.start()
         call.thread = threading.Thread(target=run_worker,
                                        args=(call, options.host, options.port, params),
                                        daemon=True)
