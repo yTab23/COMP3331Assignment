@@ -4,6 +4,7 @@ import threading
 import json
 import socket
 import app_support
+import traceback
 from mcp_io import Connection, build_response, sse_event, build_request, encode_chunk, LAST_CHUNK
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -114,21 +115,26 @@ def handle_request(headers, body, dataset, analysis_delay):
 
     return 404, app_support.error(request_id, -32601, "Method not found: " + method)
 
+
 def serve_connection(sock, dataset, analysis_delay):
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)   # send progress promptly
     conn = Connection(sock)
     try:
         while True:
             message = conn.read_message()
-            if message is None:                    # client closed cleanly
+            if message is None:                       # client closed cleanly
                 break
             headers, body = message
             if wants_stream(body):
-                stream_analysis(sock, body, dataset, analysis_delay)
-                continue                       # back to read_message(): the connection stays reusable
+                if not stream_analysis(sock, body, dataset, analysis_delay):
+                    break                             # the client went away mid-stream
+                continue
             status, payload = handle_request(headers, body, dataset, analysis_delay)
             sock.sendall(build_response(status, payload))
-    except (ConnectionError, OSError, ValueError, KeyError) as exc:
-        print("connection dropped: %s: %s" % (type(exc).__name__, exc), file=sys.stderr)   # never reuse a failed connection
+    except (ConnectionError, OSError, ValueError) as exc:     # a normal bad or dropped client
+        print("connection dropped:", type(exc).__name__, exc, file=sys.stderr)
+    except Exception:
+        traceback.print_exc()                         # a real bug: show it, but keep serving others
     finally:
         sock.close()
 
@@ -140,14 +146,15 @@ def main():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", options.port))
-    server.listen()
+    server.listen(32)
     print("Listening on 127.0.0.1:%d" % options.port, file=sys.stderr)
 
     while True:
         sock, addr = server.accept()
         print("accepted", addr, file=sys.stderr)
-        serve_connection(sock, dataset, options.analysis_delay)
-
+        threading.Thread(target=serve_connection,
+                         args=(sock, dataset, options.analysis_delay),
+                         daemon=True).start()
 
 if __name__ == "__main__":
     main()
