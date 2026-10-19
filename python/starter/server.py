@@ -3,8 +3,11 @@ import sys
 import threading
 import json
 import socket
+import time
 import app_support
 import traceback
+import select
+#from student_tools import Cancelled
 from mcp_io import Connection, build_response, sse_event, build_request, encode_chunk, LAST_CHUNK
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -13,7 +16,7 @@ DATASET_PATH = os.path.join(HERE, "support", "data", "readings.json")
 
 import app_support
 from student_tools import (TOOLS, load_dataset, get_reading, get_history,
-                           analyse_readings)
+                           analyse_readings, Cancelled)
 
 QUICK_TOOLS = {"get_reading": get_reading, "get_history": get_history}
 ALL_TOOL_NAMES = set(QUICK_TOOLS) | {"analyse_readings"}
@@ -34,20 +37,33 @@ def stream_analysis(sock, body, dataset, analysis_delay):
         b"\r\n"
     )
 
+    # after the SSE headers have been sent:
     stop = threading.Event()
+    done = threading.Event()
+    watcher = threading.Thread(target=watch_for_disconnect, args=(sock, stop, done), daemon=True)
+    watcher.start()
+    steps = []
 
-    def progress(done, total):
-        event = sse_event(app_support.progress(token, done, total))
-        sock.sendall(encode_chunk(event))
+    def progress(done_steps, total):
+        steps.append(done_steps)
+        sock.sendall(encode_chunk(sse_event(app_support.progress(token, done_steps, total))))
 
     try:
-        data = analyse_readings(dataset, arguments, analysis_delay, progress, stop)
-        final = app_support.result(request_id, tool_success(data))
-    except (ValueError, ArithmeticError) as exc:
+        try:
+            data = analyse_readings(dataset, arguments, analysis_delay, progress, stop)
+            final = app_support.result(request_id, tool_success(data))
+        except Cancelled:
 
-        final = app_support.result(request_id, tool_failure(str(exc)))
-    sock.sendall(encode_chunk(sse_event(final)))
-    sock.sendall(LAST_CHUNK)
+            print("analysis cancelled after %d of 8 steps at %.2f" % (len(steps), time.time()), file=sys.stderr)
+            return False                          # send nothing more; serve_connection closes
+        except (ValueError, ArithmeticError) as exc:
+            final = app_support.result(request_id, tool_failure(str(exc)))
+        sock.sendall(encode_chunk(sse_event(final)))
+        sock.sendall(LAST_CHUNK)
+        return True
+    finally:
+        done.set()                                # stop the watcher before the connection is reused
+        watcher.join()
 
 
 
@@ -138,23 +154,48 @@ def serve_connection(sock, dataset, analysis_delay):
     finally:
         sock.close()
 
+def watch_for_disconnect(sock, stop, done):
+    """Set `stop` if the client closes the connection. Never consumes any bytes."""
+    while not done.is_set():
+        try:
+            readable, _, _ = select.select([sock], [], [], 0.05)
+            if readable:
+                if sock.recv(1, socket.MSG_PEEK) == b"":     # peek: look without taking
+                    stop.set()                                # the client closed
+                return                # closed, or bytes are waiting: nothing more to watch
+        except (OSError, ValueError):
+            stop.set()                                        # reset or error: treat as gone
+            return
 
+
+def serve_forever(server, dataset, analysis_delay):
+    while True:
+        try:
+            sock, addr = server.accept()
+        except socket.timeout:
+            continue
+        sock.settimeout(None)
+        print("accepted", addr, file=sys.stderr)
+        threading.Thread(target=serve_connection,
+                         args=(sock, dataset, analysis_delay),
+                         daemon=True).start()
 def main():
     options = app_support.server_options()
-    dataset = load_dataset(DATASET_PATH)           # once, at startup
+    dataset = load_dataset(DATASET_PATH)
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", options.port))
     server.listen(32)
-    print("Listening on 127.0.0.1:%d" % options.port, file=sys.stderr)
+    server.settimeout(0.5)
+    print("Listening on 127.0.0.1:%d (Ctrl-C to stop)" % options.port, file=sys.stderr)
 
-    while True:
-        sock, addr = server.accept()
-        print("accepted", addr, file=sys.stderr)
-        threading.Thread(target=serve_connection,
-                         args=(sock, dataset, options.analysis_delay),
-                         daemon=True).start()
+    try:
+        serve_forever(server, dataset, options.analysis_delay)
+    except KeyboardInterrupt:
+        print("shutting down", file=sys.stderr)
+    finally:
+        server.close()
 
 if __name__ == "__main__":
     main()

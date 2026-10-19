@@ -1,0 +1,3 @@
+{"op":"call","name":"analyse_readings","arguments":{"station_id":"AU01"}}
+{"op":"call","name":"get_reading","arguments":{"station_id":"AU02"}}
+{"op":"wait"}
