@@ -70,16 +70,19 @@ class Connection:
         # parses it into self.start_line and the headers dict,
         header_end = self.buffer.index(HEADER_END) + 4
         header_text = self.buffer[:header_end].decode("utf-8")
+        self.start_line = header_text.split("\r\n")[0]      # e.g. "HTTP/1.1 200 OK"
 
         headers = {}
-
-        lines = header_text.split("\r\n")
-        self.start_line = lines[0]
-
-        for line in header_text.split("\r\n")[1:]:     # [0] is the request/status line
+        for line in header_text.split("\r\n")[1:]:
             if ":" in line:
                 name, value = line.split(":", 1)
-                headers[name.strip().lower()] = value.strip()
+                name = name.strip().lower()
+                if name in ("content-length", "transfer-encoding") and name in headers:
+                    raise ValueError("duplicate " + name + " header")
+                headers[name] = value.strip()
+
+        if "content-length" in headers and "transfer-encoding" in headers:
+            raise ValueError("conflicting framing: content-length and transfer-encoding")
 
         # and deletes the header bytes from the buffer.
 
@@ -116,7 +119,11 @@ class Connection:
         return None if size == 0 else data
 
     def read_body(self, headers):
-        content_length = int(headers["content-length"])
+        text = headers["content-length"]
+        if not (text.isascii() and text.isdigit()):
+            raise ValueError("invalid content-length: " + repr(text))
+        content_length = int(text)
+
         while len(self.buffer) < content_length:
             self._more()
         body = bytes(self.buffer[:content_length])
