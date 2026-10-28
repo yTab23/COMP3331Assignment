@@ -206,63 +206,69 @@ def main():
     options = client_options()
     connect_timeout = options.timeout
     next_id = 1
+    try:
+        for line in sys.stdin:
+            if not line.strip():
+                continue
 
-    for line in sys.stdin:
-        if not line.strip():
-            continue
+            try:
+                command = parse_json(line)
+                op = command["op"]
+            except (ValueError, KeyError, TypeError):
+                app_support.emit("input_error", message="line must be a JSON object with an op")
+                continue
 
-        try:
-            command = parse_json(line)
-            op = command["op"]
-        except (ValueError, KeyError, TypeError):
-            app_support.emit("input_error", message="line must be a JSON object with an op")
-            continue
+            if op == "wait":                              # <-- snippet 1 replaces this branch
+                wait_for_calls()
+                app_support.emit("idle")
+                continue
+            if op == "cancel":
+                cid = command.get("id")
+                with lock:
+                    call = active.get(cid) if type(cid) is int else None
+                if call is None:
+                    app_support.emit("input_error", message="no active call with that id")
+                    continue
+                app_support.emit("cancel_requested", id=cid)
+                cancel_call(call)
+                continue
+            if op == "discover":
+                method, params, token = "server/discover", {}, None
+            elif op == "list":
+                method, params, token = "tools/list", {}, None
+            elif op == "call":
+                name = command.get("name")
+                arguments = command.get("arguments")
+                if not isinstance(name, str) or not isinstance(arguments, dict):
+                    app_support.emit("input_error", message="call needs a string name and an arguments object")
+                    continue
+                method, params = "tools/call", {"name": name, "arguments": arguments}
+                token = "p%d" % next_id
+            else:
+                app_support.emit("input_error", message="unsupported op: %s" % op)   # includes cancel, for now
+                continue
 
-        if op == "wait":                              # <-- snippet 1 replaces this branch
-            wait_for_calls()
-            app_support.emit("idle")
-            continue
-        if op == "cancel":
-            cid = command.get("id")
+            request_id = next_id
+            next_id += 1
+            call = Call(request_id, method, token)
+            call.timer = threading.Timer(options.timeout, expire_call, args=(call,))
+            call.timer.daemon = True
+            call.timer.start()
+            call.thread = threading.Thread(target=run_worker,
+                                        args=(call, options.host, options.port, params),
+                                        daemon=True)
             with lock:
-                call = active.get(cid) if type(cid) is int else None
-            if call is None:
-                app_support.emit("input_error", message="no active call with that id")
-                continue
-            app_support.emit("cancel_requested", id=cid)
-            cancel_call(call)
-            continue
-        if op == "discover":
-            method, params, token = "server/discover", {}, None
-        elif op == "list":
-            method, params, token = "tools/list", {}, None
-        elif op == "call":
-            name = command.get("name")
-            arguments = command.get("arguments")
-            if not isinstance(name, str) or not isinstance(arguments, dict):
-                app_support.emit("input_error", message="call needs a string name and an arguments object")
-                continue
-            method, params = "tools/call", {"name": name, "arguments": arguments}
-            token = "p%d" % next_id
-        else:
-            app_support.emit("input_error", message="unsupported op: %s" % op)   # includes cancel, for now
-            continue
+                active[request_id] = call
+            app_support.emit("started", id=request_id, method=method, token=token)
+            call.thread.start()                     # main goes straight back to reading stdin
 
-        request_id = next_id
-        next_id += 1
-        call = Call(request_id, method, token)
-        call.timer = threading.Timer(options.timeout, expire_call, args=(call,))
-        call.timer.daemon = True
-        call.timer.start()
-        call.thread = threading.Thread(target=run_worker,
-                                       args=(call, options.host, options.port, params),
-                                       daemon=True)
+        wait_for_calls()                         # EOF: let active calls finish
+    except KeyboardInterrupt:
         with lock:
-            active[request_id] = call
-        app_support.emit("started", id=request_id, method=method, token=token)
-        call.thread.start()                     # main goes straight back to reading stdin
-
-    wait_for_calls()
+            calls = list(active.values())
+        for call in calls:
+            cancel_call(call)                    # same routine as the cancel op
+        wait_for_calls()                         # each worker emits its own finished event
     with lock:
         for conn in idle:
             conn.sock.close()
